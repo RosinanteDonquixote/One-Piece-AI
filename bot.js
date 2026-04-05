@@ -5,67 +5,85 @@ import cors from "cors";
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Configuración de seguridad y permisos
 app.use(cors());
 app.use(express.json());
 
-// 1. INICIALIZACIÓN DE LA IA (GROQ)
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// 2. PROTOCOLO DE INVESTIGACIÓN: SONDAS WIKI
-// Busca en la Wiki en ESPAÑOL (Fuente primordial de Nomenclatura oficial)
-async function buscarWikiES(tema) {
-  const url = `https://onepiece.fandom.com/es/api.php?action=parse&page=${encodeURIComponent(tema)}&prop=wikitext&format=json&redirects=1`;
+// --- SONDAS DE EXPLORACIÓN ---
+
+async function buscarWiki(tema, idioma = "es") {
+  const base = idioma === "es" ? "https://onepiece.fandom.com/es" : "https://onepiece.fandom.com";
+  const url = `${base}/api.php?action=parse&page=${encodeURIComponent(tema)}&prop=wikitext&format=json&redirects=1`;
+  
   try {
     const res = await fetch(url, { headers: { "User-Agent": "PythagorasBot/1.0" } });
     const datos = await res.json();
-    return datos.parse?.wikitext["*"].substring(0, 6000) || "Sin datos en español.";
-  } catch { return "Error en conexión ES."; }
+    return datos.parse?.wikitext["*"].substring(0, 7000) || "";
+  } catch { return ""; }
 }
 
-// Busca en la Wiki en INGLÉS (Fuente primordial de Detalles Técnicos y SBS)
-async function buscarWikiEN(tema) {
-  const url = `https://onepiece.fandom.com/api.php?action=parse&page=${encodeURIComponent(tema)}&prop=wikitext&format=json&redirects=1`;
+// --- FUNCIÓN PARA DETECTAR SEGUNDO PERSONAJE ---
+async function detectarSegundoPersonaje(pregunta, temaActual) {
   try {
-    const res = await fetch(url, { headers: { "User-Agent": "PythagorasBot/1.0" } });
-    const datos = await res.json();
-    return datos.parse?.wikitext["*"].substring(0, 9000) || "Sin datos en inglés.";
-  } catch { return "Error en conexión EN."; }
+    const completion = await groq.chat.completions.create({
+      messages: [{ 
+        role: "system", 
+        content: `Eres un extractor de nombres. Identifica si en la pregunta se menciona a un personaje de One Piece que NO sea "${temaActual}". Responde SOLO con el nombre del personaje o la palabra "NINGUNO".` 
+      }, { 
+        role: "user", content: pregunta 
+      }],
+      model: "llama-3.1-8b-instant",
+      temperature: 0,
+    });
+    const nombre = completion.choices[0]?.message?.content.trim();
+    return (nombre === "NINGUNO" || nombre.length > 30) ? null : nombre;
+  } catch { return null; }
 }
 
-// 3. PROCESADOR CENTRAL DE CONSULTAS
+// --- PROCESADOR CENTRAL ---
+
 app.get("/preguntar", async (req, res) => {
   const { q, tema, larga, historialTemas } = req.query;
 
-  if (!q || !tema) {
-    return res.send("Error: Pythagoras requiere una pregunta y un tema de análisis.");
+  if (!q || !tema) return res.send("Error: Faltan datos.");
+
+  // 1. Detectar si hay un segundo personaje involucrado
+  const segundoTema = await detectarSegundoPersonaje(q, tema);
+  
+  // 2. Lanzar todas las sondas necesarias (2 o 4)
+  const promesas = [
+    buscarWiki(tema, "es"),
+    buscarWiki(tema, "en")
+  ];
+
+  if (segundoTema) {
+    console.log(`🔍 Sincronizando datos adicionales de: ${segundoTema}`);
+    promesas.push(buscarWiki(segundoTema, "es"));
+    promesas.push(buscarWiki(segundoTema, "en"));
   }
 
-  console.log(`🧠 Pythagoras analizando: ${tema}. Historial detectado: ${historialTemas}`);
+  const resultados = await Promise.all(promesas);
+  const infoTemaES = resultados[0];
+  const infoTemaEN = resultados[1];
+  const infoSegundoES = resultados[2] || "";
+  const infoSegundoEN = resultados[3] || "";
 
-  // Ejecución simultánea de sondas para optimizar tiempo de respuesta
-  const [datosES, datosEN] = await Promise.all([
-    buscarWikiES(tema),
-    buscarWikiEN(tema)
-  ]);
-
-  // CONFIGURACIÓN DEL SISTEMA DE IA (SISTEMA DE DIRECTRICES PUNK-04)
-const sistemaPythagoras = `
-    Eres Punk-04 Pythagoras. Tu función es ser un espejo fiel de la Wiki.
+  // 3. Instrucciones de Pythagoras con Doble Verificación
+  const sistemaPythagoras = `
+    Eres Punk-04 Pythagoras. Tu función es cruzar datos de múltiples archivos de la Wiki.
     
-    REGLA DE ORO CONTRA ALUCINACIONES:
-    1. PROHIBIDO INVENTAR: Solo puedes responder usando la información explícita de los textos proporcionados (ES y EN).
-    2. SI NO ESTÁ, NO EXISTE: Si un detalle (como el arma exacta o el sentimiento de un personaje) no aparece en el texto, no te lo inventes. Di "Los archivos no especifican ese detalle".
-    3. PRIORIDAD CANÓNICA: Kizaru usa luz/láseres, Saturno usa sus patas. No confundas acciones entre personajes.
-
-    REGLAS DE PROCESAMIENTO TÉCNICO:
-    1. NOMENCLATURA: Usa siempre términos de la fuente ES (español).
-    2. DETALLES: Usa la fuente EN (inglés) para datos técnicos.
-    3. MEMORIA: Tienes este historial: [${historialTemas || 'Ninguno'}].
-    4. ESTILO: Científico, conciso y amable.
+    PROTOCOLO DE VERIFICACIÓN CRUZADA:
+    1. Tienes datos del TEMA PRINCIPAL (${tema}) y del SEGUNDO TEMA (${segundoTema || 'N/A'}).
+    2. Compara ambas fuentes para describir relaciones. Si preguntas por una pelea o relación, verifica las habilidades y acciones en ambos archivos.
+    3. PROHIBIDO INVENTAR: Si en el archivo de ${segundoTema} dice que usa láseres, no digas que usa cuchillos.
     
-    CONTROL DE EXTENSIÓN:
-    - CONFIGURACIÓN: ${larga === "true" ? "MODO DETALLADO" : "MODO CONCISO"}.
+    REGLAS PERMANENTES:
+    - NOMENCLATURA: Usa siempre términos de la fuente ESPAÑOLA.
+    - DETALLES: Extrae la profundidad de la fuente INGLESA.
+    - MEMORIA: El investigador ha visitado: [${historialTemas}].
+    - EXTENSIÓN: ${larga === "true" ? "MODO DETALLADO (EXTENSO)." : "MODO CONCISO (BREVE)."}
+    - ESTILO: Científico, analítico y amable.
   `;
 
   try {
@@ -74,22 +92,27 @@ const sistemaPythagoras = `
         { role: "system", content: sistemaPythagoras },
         { 
           role: "user", 
-          content: `TEXTOS DE REFERENCIA:\nESPAÑOL: ${datosES}\nINGLÉS: ${datosEN}\n\nPREGUNTA DEL INVESTIGADOR: ${q}` 
+          content: `
+            ARCHIVOS TEMA PRINCIPAL (${tema}):
+            ES: ${infoTemaES}
+            EN: ${infoTemaEN}
+            
+            ${segundoTema ? `ARCHIVOS SEGUNDO TEMA (${segundoTema}):
+            ES: ${infoSegundoES}
+            EN: ${infoSegundoEN}` : ""}
+            
+            PREGUNTA: ${q}
+          ` 
         }
       ],
       model: "llama-3.1-8b-instant",
-      temperature: 0.1, // <--- BAJAMOS ESTO PARA MÁXIMA PRECISIÓN
+      temperature: 0.1, // Precisión máxima para evitar inventos
     });
 
     res.send(chatCompletion.choices[0]?.message?.content);
-
   } catch (error) {
-    console.error("Fallo en el núcleo de Pythagoras:", error);
-    res.send("Error de sincronización: Mi procesador central no ha podido vincular las fuentes de datos.");
+    res.send("Error en la conexión con los Archivos de Ohara.");
   }
 });
 
-// 4. ENCENDIDO DEL SATÉLITE
-app.listen(port, () => {
-  console.log(`🚀 Sistema Pythagoras (Punk-04) activo en puerto ${port}`);
-});
+app.listen(port, () => console.log(`🚀 Pythagoras operando en puerto ${port}`));
